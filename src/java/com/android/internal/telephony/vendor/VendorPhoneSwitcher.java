@@ -20,6 +20,9 @@ import static android.telephony.SubscriptionManager.DEFAULT_SUBSCRIPTION_ID;
 import static android.telephony.SubscriptionManager.INVALID_PHONE_INDEX;
 import static android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID;
 import static android.telephony.TelephonyManager.RADIO_POWER_UNAVAILABLE;
+import static android.telephony.TelephonyManager.SIM_STATE_PIN_REQUIRED;
+import static android.telephony.TelephonyManager.SIM_STATE_PUK_REQUIRED;
+import static android.telephony.TelephonyManager.SIM_STATE_NETWORK_LOCKED;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -78,14 +81,14 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
     private DdsSwitchState mDdsSwitchState = DdsSwitchState.NONE;
     private final int USER_INITIATED_SWITCH = 0;
     private final int NONUSER_INITIATED_SWITCH = 1;
-    private final String PROPERTY_TEMP_DDSSWITCH = "persist.vendor.radio.enable_temp_dds";
-    private final GsmCdmaCall[] mFgCsCalls;
-    private final GsmCdmaCall[] mBgCsCalls;
-    private final GsmCdmaCall[] mRiCsCalls;
-    private final ImsPhone[] mImsPhones;
-    private final ImsPhoneCall[] mFgImsCalls;
-    private final ImsPhoneCall[] mBgImsCalls;
-    private final ImsPhoneCall[] mRiImsCalls;
+    protected final String PROPERTY_TEMP_DDSSWITCH = "persist.vendor.radio.enable_temp_dds";
+    protected final GsmCdmaCall[] mFgCsCalls;
+    protected final GsmCdmaCall[] mBgCsCalls;
+    protected final GsmCdmaCall[] mRiCsCalls;
+    protected final ImsPhone[] mImsPhones;
+    protected final ImsPhoneCall[] mFgImsCalls;
+    protected final ImsPhoneCall[] mBgImsCalls;
+    protected final ImsPhoneCall[] mRiImsCalls;
 
     private final int EVENT_ALLOW_DATA_FALSE_RESPONSE  = 201;
     private final int EVENT_ALLOW_DATA_TRUE_RESPONSE   = 202;
@@ -203,11 +206,15 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
             case EVENT_ALLOW_DATA_FALSE_RESPONSE: {
                 log("EVENT_ALLOW_DATA_FALSE_RESPONSE");
                 mWaitForDetachResponse = false;
-                for (int phoneId : mNewActivePhones) {
-                    activate(phoneId);
-                }
-                if (mNewActivePhones.contains(ddsPhoneId)) {
-                    mManualDdsSwitch = false;
+                if (mNewActivePhones != null) {
+                    for (int phoneId : mNewActivePhones) {
+                        activate(phoneId);
+                    }
+                    if (mNewActivePhones.contains(ddsPhoneId)) {
+                        mManualDdsSwitch = false;
+                    }
+                } else {
+                    log("mNewActivePhones is NULL");
                 }
                 break;
             }
@@ -241,8 +248,23 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
         }
     }
 
+    private boolean isSimLocked(int phoneId) {
+        final int simState = mSubscriptionController.getSimStateForSlotIndex(phoneId);
+        if (SIM_STATE_PIN_REQUIRED == simState
+                || SIM_STATE_PUK_REQUIRED == simState
+                || SIM_STATE_NETWORK_LOCKED == simState) {
+            log("SIM locked for phoneId: " + phoneId);
+            return true;
+        }
+        return false;
+    }
+
     @Override
     protected boolean onEvaluate(boolean requestsChanged, String reason) {
+        if (!com.android.internal.telephony.SubscriptionInfoUpdater.isSubInfoInitialized()) {
+            log("subscription info isn't initialized yet");
+            return false;
+        }
         StringBuilder sb = new StringBuilder(reason);
 
         boolean diffDetected = requestsChanged;
@@ -265,7 +287,11 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
         for (int i = 0; i < mActiveModemCount; i++) {
             int sub = mSubscriptionController.getSubIdUsingPhoneId(i);
 
-            if (SubscriptionManager.isValidSubscriptionId(sub)) hasAnyActiveSubscription = true;
+            if (SubscriptionManager.isValidSubscriptionId(sub) && !isSimLocked(i)) {
+                hasAnyActiveSubscription = true;
+            } else {
+                log("slot" + i + " not a valid subscription or locked");
+            }
 
             if (sub != mPhoneSubscriptions[i]) {
                 sb.append(" phone[").append(i).append("] ").append(mPhoneSubscriptions[i]);
@@ -420,7 +446,8 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
         boolean isUiccApplicationEnabled = true;
         // FIXME get the SubscriptionManager.UICC_APPLICATIONS_ENABLED value and use it here
         log("isUiccProvisioned: status= " + isUiccApplicationEnabled + " phoneid=" + phoneId);
-        return mSubscriptionController.isActiveSubId(mPhoneSubscriptions[phoneId]) && isUiccApplicationEnabled; 
+        return mSubscriptionController.isActiveSubId(mPhoneSubscriptions[phoneId]) &&
+                isUiccApplicationEnabled;
     }
 
     @Override
@@ -553,10 +580,17 @@ public class VendorPhoneSwitcher extends PhoneSwitcher {
                         PROPERTY_TEMP_DDSSWITCH, false);
                 int ddsPhoneId = mSubscriptionController.getPhoneId(
                         mSubscriptionController.getDefaultDataSubId());
+                boolean dataDuringCallsEnabled = false;
+                Phone phone = PhoneFactory.getPhone(phoneId);
+                DataEnabledSettings dataEnabledSettings = phone.getDataEnabledSettings();
+                if (dataEnabledSettings != null) {
+                    dataDuringCallsEnabled = dataEnabledSettings.isDataAllowedInVoiceCall();
+                }
                 log("onDdsSwitchResponse: isTempSwitchPropEnabled=" + isTempSwitchPropEnabled +
-                        ", ddsPhoneId=" + ddsPhoneId + ", mPreferredDataPhoneId=" +
-                        mPreferredDataPhoneId);
-                if (isTempSwitchPropEnabled && (phoneId != ddsPhoneId) &&
+                        "dataDuringCallsEnabled=" + dataDuringCallsEnabled + ", ddsPhoneId=" +
+                        ddsPhoneId + ", mPreferredDataPhoneId=" + mPreferredDataPhoneId);
+                if ((isTempSwitchPropEnabled || dataDuringCallsEnabled) &&
+                        (phoneId != ddsPhoneId) &&
                         getConnectFailureCount(phoneId) < MAX_CONNECT_FAILURE_COUNT) {
                     log("Retry Temporary DDS switch on phoneId:" + phoneId);
                     sendRilCommands(phoneId);
