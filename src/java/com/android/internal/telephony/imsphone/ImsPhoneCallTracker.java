@@ -335,7 +335,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 int subId = intent.getIntExtra(PhoneConstants.SUBSCRIPTION_KEY,
                         SubscriptionManager.INVALID_SUBSCRIPTION_ID);
                 if (subId == mPhone.getSubId()) {
-                    cacheCarrierConfiguration(subId);
+                    updateCarrierConfiguration(subId);
                     log("onReceive : Updating mAllowEmergencyVideoCalls = " +
                             mAllowEmergencyVideoCalls);
                 }
@@ -895,7 +895,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         intentfilter.addAction(CarrierConfigManager.ACTION_CARRIER_CONFIG_CHANGED);
         intentfilter.addAction(TelecomManager.ACTION_DEFAULT_DIALER_CHANGED);
         mPhone.getContext().registerReceiver(mReceiver, intentfilter);
-        cacheCarrierConfiguration(mPhone.getSubId());
+        updateCarrierConfiguration(mPhone.getSubId());
 
         mPhone.getDefaultPhone().getDataEnabledSettings().registerForDataEnabledChanged(
                 this, EVENT_DATA_ENABLED_CHANGED, null);
@@ -1041,6 +1041,7 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
             }
             mImsManager.close();
         }
+        hangupAllOrphanedConnections(DisconnectCause.LOST_SIGNAL);
         // For compatibility with apps that still use deprecated intent
         sendImsServiceStateIntent(ImsManager.ACTION_IMS_SERVICE_DOWN);
     }
@@ -1057,6 +1058,27 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
                 loge("Failed to disconnet call...");
             }
         });
+    }
+
+    /*
+     * Hang up all ongoing connections in the case that the ImsService has been disconnected and the
+     * existing calls have been orphaned. This method assumes that there is no connection to the
+     * ImsService and DOES NOT try to terminate the connections on the service side before
+     * disconnecting here, as it assumes they have already been disconnected when we lost the
+     * connection to the ImsService.
+     */
+    @VisibleForTesting
+    public void hangupAllOrphanedConnections(int disconnectCause) {
+        Log.w(LOG_TAG, "hangupAllOngoingConnections called for cause " + disconnectCause);
+
+        // Move connections to disconnected and notify the reason why.
+        for (ImsPhoneConnection connection : mConnections) {
+            connection.update(connection.getImsCall(), ImsPhoneCall.State.DISCONNECTED);
+            connection.onDisconnect(disconnectCause);
+            connection.getCall().detach(connection);
+        }
+        mConnections.clear();
+        updatePhoneState();
     }
 
     private void sendImsServiceStateIntent(String intentAction) {
@@ -1381,11 +1403,13 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
     }
 
     /**
-     * Caches frequently used carrier configuration items locally.
+     * Caches frequently used carrier configuration items locally and notifies ImsService of new
+     * configuration if the subId is valid (there is an active sub ID loaded).
      *
-     * @param subId The sub id.
+     * @param subId The sub id to use to update configuration, may be invalid if a SIM has been
+     *              removed.
      */
-    private void cacheCarrierConfiguration(int subId) {
+    private void updateCarrierConfiguration(int subId) {
         CarrierConfigManager carrierConfigManager = (CarrierConfigManager)
                 mPhone.getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
         if (carrierConfigManager == null
@@ -1405,6 +1429,9 @@ public class ImsPhoneCallTracker extends CallTracker implements ImsPullCall {
         mCarrierConfigLoaded = true;
 
         updateCarrierConfigCache(carrierConfig);
+        if (mImsManager != null) {
+            mImsManager.updateImsServiceConfig(true);
+        }
     }
 
     /**
